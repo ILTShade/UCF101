@@ -64,7 +64,10 @@ class SpatialDataset(Data.Dataset):
             data = list()
             for i in range(self.train_slice):
                 low_bound = math.floor(i * frame_count / self.train_slice)
-                high_bound = min(math.ceil((i + 1) * frame_count / self.train_slice), frame_count - 1)
+                high_bound = min(
+                    math.ceil((i + 1) * frame_count / self.train_slice),
+                    frame_count - 1
+                )
                 selected_index = random.randint(low_bound, high_bound)
                 data.append(self.load_ucf_image(video_path, selected_index))
             sample = (type_name, video_name, data, self.map_name_label[type_name])
@@ -89,6 +92,9 @@ class SpatialDataset(Data.Dataset):
         return self.transform(img)
 
 class Dataset(object):
+    '''
+    dataset
+    '''
     def __init__(self, ucf_data_path, ucf_anno_path, ucf_flag, batch_size, num_workers):
         if not ucf_flag in ['01', '02', '03']:
             raise Exception(f'out of range')
