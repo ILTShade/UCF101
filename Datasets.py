@@ -12,9 +12,12 @@
 import os
 import math
 import random
+from tqdm import tqdm
+import numpy as np
 from PIL import Image
 from torch.utils import data as Data
 import torchvision.transforms as Transforms
+from utils import dmd_transform
 
 class SpatialDataset(Data.Dataset):
     '''
@@ -51,13 +54,17 @@ class SpatialDataset(Data.Dataset):
             frame_count = len(list(filter(lambda x: x.endswith('.jpg'), os.listdir(video_path))))
             frame_count = frame_count - self.window_length + 1
             self.record_list.append((type_name, video_name, video_path, frame_count))
+        # dmd_transformer
+        self.output_root_path = os.path.join(os.path.dirname(self.ucf_data_path), 'npys_256')
+        if not os.path.exists(self.output_root_path):
+            os.mkdir(self.output_root_path)
+        self.dmd_transfromer = dmd_transform.DMDTransform(self.window_length, mode = 'gpu')
     def __len__(self):
         if self.mode == 'train':
             return len(self.record_list)
-        elif self.mode == 'test':
+        if self.mode == 'test':
             return len(self.record_list) * self.test_count
-        else:
-            raise Exception(f'does NOT support {self.mode}')
+        raise Exception(f'does NOT support {self.mode}')
     def __getitem__(self, index):
         if self.mode == 'train':
             type_name, video_name, video_path, frame_count = self.record_list[index]
@@ -90,6 +97,32 @@ class SpatialDataset(Data.Dataset):
         image_name = os.path.join(video_path, f'frame{selected_index + 1:06d}.jpg')
         img = Image.open(image_name)
         return self.transform(img)
+    def generate_dct_npy(self):
+        '''
+        generate dct npy file
+        '''
+        for type_name, video_name, video_path, frame_count in tqdm(self.record_list):
+            output_video_path = os.path.join(self.output_root_path, f'{video_name}.npz')
+            if os.path.exists(output_video_path):
+                continue
+            # load gray image
+            files = filter(lambda f: f.endswith('.jpg'), os.listdir(video_path))
+            files = sorted(files, key = lambda f: int(os.path.splitext(f)[0][len('frame'):]))
+            # read image array
+            image_array = [np.expand_dims(
+                np.array(Image.open(os.path.join(video_path, f)).convert('L')),
+                axis = -1,
+                ) for f in files]
+            image_array = [im.astype(np.float32) * 2. / 255. - 1 for im in image_array]
+            image_array = np.stack(image_array, axis = 0)
+            # transfer
+            output_array, consume_time = self.dmd_transfromer.transfer(image_array)
+            output_array = output_array * 128. / (2 * self.window_length)
+            output_array = np.clip(output_array, -128, 127).astype(np.int8)
+            if not output_array.shape[0] == frame_count:
+                raise Exception(f'output shape mismatch')
+            # save file
+            np.savez_compressed(output_video_path, output_array)
 
 class Dataset(object):
     '''
@@ -132,24 +165,34 @@ class Dataset(object):
                 dataset = self.train_dataset,
                 batch_size = self.batch_size,
                 shuffle = True,
-                num_workers = self.num_workers
+                num_workers = self.num_workers,
+                drop_last = True,
             )
-        elif phase == 'test':
+        if phase == 'test':
             return Data.DataLoader(
                 dataset = self.test_dataset,
                 batch_size = self.batch_size,
                 shuffle = False,
-                num_workers = self.num_workers
+                num_workers = self.num_workers,
             )
-        else:
-            raise Exception(f'does NOT support {phase}')
+        raise Exception(f'does NOT support {phase}')
+    def generate_dct_npy(self):
+        '''
+        generate dct npy file
+        '''
+        self.train_dataset.generate_dct_npy()
+        self.test_dataset.generate_dct_npy()
 
 if __name__ == '__main__':
     dataset = Dataset(
-        '/datasets/UCF101/jpegs_256/',
-        '/datasets/UCF101/UCF_list/',
+        '/datasets/UCF101/jpegs_256',
+        '/datasets/UCF101/UCF_list',
         '01',
         25,
         8,
     )
     train_loader = dataset.get_loader('train')
+    test_loader = dataset.get_loader('test')
+    print(len(train_loader))
+    print(len(test_loader))
+    dataset.generate_dct_npy()
