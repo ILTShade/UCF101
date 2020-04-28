@@ -100,10 +100,20 @@ class DMDTransform:
         elif self.mode == 'gpu':
             output_shape = [vid_length, self.dct_length * image_array.shape[3]] + list(image_array.shape[1:3])
             output = np.zeros(shape = output_shape, dtype = np.float32)
-            # grid and block
-            block = (vid_length, 1, 1)
-            grid = image_array.shape[1:]
-            self.DCTGPU(drv.Out(output), drv.In(image_array), drv.In(self.weights), block = block, grid = grid)
+            # block and grid
+            max_block_dim_x = self.device.get_attribute(drv.device_attribute.MAX_BLOCK_DIM_X)
+            group_number = math.ceil(vid_length / max_block_dim_x)
+            for i in range(group_number):
+                block_dim_x = min((i + 1) * max_block_dim_x, vid_length) - i * max_block_dim_x
+                block = (block_dim_x, 1, 1)
+                grid = image_array.shape[1:]
+                self.DCTGPU(
+                    drv.Out(output[i*max_block_dim_x:(i*max_block_dim_x+block_dim_x),...]),
+                    drv.In(image_array[i*max_block_dim_x:(i+max_block_dim_x+block_dim_x+self.dct_length-1),...]),
+                    drv.In(self.weights),
+                    block = block,
+                    grid = grid,
+                )
         else:
             raise NotImplementedError
         consume_time = time.time() - start_time
