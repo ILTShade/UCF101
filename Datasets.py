@@ -9,25 +9,30 @@
 @CreateTime:
     2020/04/24 00:04
 '''
-import os
 import math
+import os
 import random
-from tqdm import tqdm
+
 import numpy as np
-from PIL import Image
-from torch.utils import data as Data
+import torch
 import torchvision.transforms as Transforms
+import torchvision.transforms.functional as TF
+from PIL import Image
+from skimage import transform
+from torch.utils import data as Data
+from tqdm import tqdm
+
 from utils import dmd_transform
+
 
 class SpatialDataset(Data.Dataset):
     '''
     spatial dataset
     '''
-    def __init__(self, ucf_data_path, ucf_class_path, ucf_list_path, mode, transform):
+    def __init__(self, ucf_data_path, ucf_class_path, ucf_list_path, mode, dataset_flag):
         super(SpatialDataset, self).__init__()
         self.ucf_data_path = ucf_data_path
         self.mode = mode
-        self.transform = transform
         self.window_length = 10
         self.test_count = 19
         self.train_slice = 3
@@ -55,10 +60,14 @@ class SpatialDataset(Data.Dataset):
             frame_count = frame_count - self.window_length + 1
             self.record_list.append((type_name, video_name, video_path, frame_count))
         # dmd_transformer
-        self.output_root_path = os.path.join(os.path.dirname(self.ucf_data_path), 'npys_256')
-        if not os.path.exists(self.output_root_path):
-            os.mkdir(self.output_root_path)
+        self.dmd_data_path = os.path.join(os.path.dirname(self.ucf_data_path), 'npys_256')
+        if not os.path.exists(self.dmd_data_path):
+            os.mkdir(self.dmd_data_path)
         self.dmd_transfromer = dmd_transform.DMDTransform(self.window_length, mode = 'gpu')
+        # set dataset flag
+        self.dmd_ndarray = None
+        self.output_transformer = None
+        self.set_dataset_flag(dataset_flag)
     def __len__(self):
         if self.mode == 'train':
             return len(self.record_list)
@@ -69,6 +78,7 @@ class SpatialDataset(Data.Dataset):
         if self.mode == 'train':
             type_name, video_name, video_path, frame_count = self.record_list[index]
             data = list()
+            self.dmd_ndarray = None
             for i in range(self.train_slice):
                 low_bound = math.floor(i * frame_count / self.train_slice)
                 high_bound = min(
@@ -76,7 +86,7 @@ class SpatialDataset(Data.Dataset):
                     frame_count - 1
                 )
                 selected_index = random.randint(low_bound, high_bound)
-                data.append(self.load_ucf_image(video_path, selected_index))
+                data.append(self.load_ucf_image(video_name, video_path, selected_index))
             sample = (type_name, video_name, data, self.map_name_label[type_name])
         elif self.mode == 'test':
             # load video
@@ -85,24 +95,34 @@ class SpatialDataset(Data.Dataset):
             # load index
             interval = int(frame_count / self.test_count)
             selected_index = (index % self.test_count) * interval
-            data = self.load_ucf_image(video_path, selected_index)
+            self.dmd_ndarray = None
+            data = self.load_ucf_image(video_name, video_path, selected_index)
             sample = (type_name, video_name, data, self.map_name_label[type_name])
         else:
             raise Exception(f'does NOT support {self.mode}')
         return sample
-    def load_ucf_image(self, video_path, selected_index):
+    def load_ucf_image(self, video_name, video_path, selected_index):
         '''
         load selected image
         '''
         image_name = os.path.join(video_path, f'frame{selected_index + 1:06d}.jpg')
         img = Image.open(image_name)
-        return self.transform(img)
-    def generate_dct_npy(self):
+        if self.dataset_flag == 'spatial':
+            return self.output_transformer(img)
+        if self.dataset_flag == 'spatial_dmd':
+            dmd_file_name = os.path.join(self.dmd_data_path, f'{video_name}.npz')
+            if self.dmd_ndarray is None:
+                self.dmd_ndarray = np.load(dmd_file_name)['arr_0']
+            # load split index
+            input_dmd = self.dmd_ndarray[selected_index]
+            return self.output_transformer(img, input_dmd)
+        raise Exception(f'does NOT support {self.dataset_flag}')
+    def generate_dmd_npy(self):
         '''
-        generate dct npy file
+        generate dmd npy file
         '''
         for type_name, video_name, video_path, frame_count in tqdm(self.record_list):
-            output_video_path = os.path.join(self.output_root_path, f'{video_name}.npz')
+            output_video_path = os.path.join(self.dmd_data_path, f'{video_name}.npz')
             if os.path.exists(output_video_path):
                 continue
             # load gray image
@@ -123,12 +143,79 @@ class SpatialDataset(Data.Dataset):
                 raise Exception(f'output shape mismatch')
             # save file
             np.savez_compressed(output_video_path, output_array)
+    def set_dataset_flag(self, dataset_flag):
+        '''
+        set dataset flag
+        '''
+        if dataset_flag == 'spatial':
+            if self.mode == 'train':
+                self.output_transformer = Transforms.Compose([
+                    Transforms.RandomCrop(224),
+                    Transforms.RandomHorizontalFlip(),
+                    Transforms.ToTensor(),
+                    Transforms.Normalize(mean = [0.485, 0.456, 0.406], std = [0.229, 0.224, 0.225]),
+                ])
+            elif self.mode == 'test':
+                self.output_transformer = Transforms.Compose([
+                    Transforms.Resize([224, 224]),
+                    Transforms.ToTensor(),
+                    Transforms.Normalize(mean = [0.485, 0.456, 0.406], std = [0.229, 0.224, 0.225]),
+                ])
+            else:
+                raise Exception(f'does NOT support {self.mode}')
+        elif dataset_flag == 'spatial_dmd':
+            if self.mode == 'train':
+                def spatial_dmd_train_transform(input_img, input_dmd):
+                    '''
+                    input image: PIL Image
+                    input dmd: ndarray
+                    '''
+                    # rand crop
+                    w, h = input_img.size
+                    th, tw = 224, 224
+                    if not (w == tw and h == th):
+                        i = random.randint(0, h - th)
+                        j = random.randint(0, w - tw)
+                        input_img = TF.crop(input_img, i, j, th, tw)
+                        input_dmd = input_dmd[:,i:(i+th),j:(j+tw)]
+                    # random horizontal flip
+                    if random.random() > 0.5:
+                        input_img = TF.hflip(input_img)
+                        input_dmd = input_dmd[:,:,::-1]
+                    # to tensor
+                    input_img = TF.to_tensor(input_img)
+                    input_img= TF.normalize(input_img, [0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
+                    input_dmd = torch.from_numpy(input_dmd.astype(np.float32) / 128.)
+                    # concat
+                    return np.concatenate((input_img, input_dmd), axis = 0)
+                self.output_transformer = spatial_dmd_train_transform
+            elif self.mode == 'test':
+                def spatial_dmd_test_transform(input_img, input_dmd):
+                    '''
+                    input image: PIL Image
+                    input dmd: ndarray
+                    '''
+                    # resize
+                    th, tw = 224, 224
+                    input_img = TF.resize(input_img, (th, tw))
+                    input_dmd = transform.resize(np.transpose(input_dmd, (1, 2, 0)), (th, tw))
+                    # to tensor
+                    input_img = TF.to_tensor(input_img)
+                    input_img= TF.normalize(input_img, [0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
+                    input_dmd = torch.from_numpy(np.transpose(input_dmd.astype(np.float32), (2, 0, 1)))
+                    return np.concatenate((input_img, input_dmd), axis = 0)
+                self.output_transformer = spatial_dmd_test_transform
+            else:
+                raise Exception(f'does NOT support {self.mode}')
+        else:
+            raise Exception(f'does NOT support {dataset_flag}')
+        self.dataset_flag = dataset_flag
 
 class Dataset(object):
     '''
     dataset
     '''
-    def __init__(self, ucf_data_path, ucf_anno_path, ucf_flag, batch_size, num_workers):
+    def __init__(self, ucf_data_path, ucf_anno_path, ucf_flag, dataset_flag,batch_size, num_workers):
         if not ucf_flag in ['01', '02', '03']:
             raise Exception(f'out of range')
         self.train_dataset = SpatialDataset(
@@ -136,23 +223,14 @@ class Dataset(object):
             os.path.join(ucf_anno_path, 'classInd.txt'),
             os.path.join(ucf_anno_path, f'trainlist{ucf_flag}.txt'),
             'train',
-            Transforms.Compose([
-                Transforms.RandomCrop(224),
-                Transforms.RandomHorizontalFlip(),
-                Transforms.ToTensor(),
-                Transforms.Normalize(mean = [0.485, 0.456, 0.406], std = [0.229, 0.224, 0.225]),
-            ]),
+            dataset_flag,
         )
         self.test_dataset = SpatialDataset(
             ucf_data_path,
             os.path.join(ucf_anno_path, 'classInd.txt'),
             os.path.join(ucf_anno_path, f'testlist{ucf_flag}.txt'),
             'test',
-            Transforms.Compose([
-                Transforms.Resize([224, 224]),
-                Transforms.ToTensor(),
-                Transforms.Normalize(mean = [0.485, 0.456, 0.406], std = [0.229, 0.224, 0.225]),
-            ]),
+            dataset_flag,
         )
         self.batch_size = batch_size
         self.num_workers = num_workers
@@ -176,23 +254,26 @@ class Dataset(object):
                 num_workers = self.num_workers,
             )
         raise Exception(f'does NOT support {phase}')
-    def generate_dct_npy(self):
+    def generate_dmd_npy(self):
         '''
-        generate dct npy file
+        generate dmd npy file
         '''
-        self.train_dataset.generate_dct_npy()
-        self.test_dataset.generate_dct_npy()
+        self.train_dataset.generate_dmd_npy()
+        self.test_dataset.generate_dmd_npy()
 
 if __name__ == '__main__':
     dataset = Dataset(
         '/datasets/UCF101/jpegs_256',
         '/datasets/UCF101/UCF_list',
         '01',
+        'spatial',
         25,
-        8,
+        0,
     )
     train_loader = dataset.get_loader('train')
     test_loader = dataset.get_loader('test')
     print(len(train_loader))
     print(len(test_loader))
-    dataset.generate_dct_npy()
+    train_load_0 = next(train_loader.__iter__())
+    test_load_0 = next(test_loader.__iter__())
+    dataset.generate_dmd_npy()
