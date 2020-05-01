@@ -224,7 +224,7 @@ class Dataset(object):
     dataset
     '''
     def __init__(self, ucf_data_path, ucf_anno_path, ucf_flag, dataset_flag,batch_size, num_workers):
-        if not ucf_flag in ['01', '02', '03']:
+        if not ucf_flag in ['01', '04']:
             raise Exception(f'out of range')
         self.train_dataset = SpatialDataset(
             ucf_data_path,
