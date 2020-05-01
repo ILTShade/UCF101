@@ -28,15 +28,15 @@ class Trainer(object):
         self.dataset = Datasets.Dataset(
             '/datasets/UCF101/jpegs_256',
             '/datasets/UCF101/UCF_list',
-            '01',
-            'spatial',
-            10,
-            16,
+            '04',
+            'spatial_dmd',
+            30,
+            24,
         )
         self.train_loader = self.dataset.get_loader('train')
         self.test_loader = self.dataset.get_loader('test')
         # networks
-        self.net = Networks.Network(pretrain_path = './zoo/spatial_pretrain.pth')
+        self.net = Networks.Network(in_channels = 13, out_classes = 10, pretrain_path = './zoo/spatial_pretrain.pth')
     def train(self):
         '''
         train network
@@ -72,10 +72,10 @@ class Trainer(object):
                 optimizer.step()
                 tqdm_loader.set_description(f'loss is {loss.item():.4f}')
             # test and scheduler
-            if epoch % 10 == 0:
+            if epoch == 0 or (epoch + 1) % 10 == 0:
                 accuracy = self.evaluate()
                 print(f'epoch {epoch+1:04d}: accuracy is {accuracy}')
-                torch.save(self.net.module.state_dict(), f'./zoo/train_{epoch+1}_{accuracy}.pth')
+                torch.save(self.net.module.state_dict(), f'./zoo/spatial_dmd_{epoch+1}_{accuracy}.pth')
     def evaluate(self):
         '''
         evaluate network
