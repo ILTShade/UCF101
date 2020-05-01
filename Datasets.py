@@ -18,12 +18,20 @@ import torch
 import torchvision.transforms as Transforms
 import torchvision.transforms.functional as TF
 from PIL import Image
+from prefetch_generator import BackgroundGenerator
 from skimage import transform
 from torch.utils import data as Data
+from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from utils import dmd_transform
 
+class DataLoaderX(DataLoader):
+    '''
+    DataLoaderX
+    '''
+    def __iter__(self):
+        return BackgroundGenerator(super().__iter__())
 
 class SpatialDataset(Data.Dataset):
     '''
@@ -65,7 +73,6 @@ class SpatialDataset(Data.Dataset):
             os.mkdir(self.dmd_data_path)
         self.dmd_transfromer = dmd_transform.DMDTransform(self.window_length, mode = 'gpu')
         # set dataset flag
-        self.dmd_ndarray = None
         self.output_transformer = None
         self.set_dataset_flag(dataset_flag)
     def __len__(self):
@@ -78,7 +85,6 @@ class SpatialDataset(Data.Dataset):
         if self.mode == 'train':
             type_name, video_name, video_path, frame_count = self.record_list[index]
             data = list()
-            self.dmd_ndarray = None
             for i in range(self.train_slice):
                 low_bound = math.floor(i * frame_count / self.train_slice)
                 high_bound = min(
@@ -95,7 +101,6 @@ class SpatialDataset(Data.Dataset):
             # load index
             interval = int(frame_count / self.test_count)
             selected_index = (index % self.test_count) * interval
-            self.dmd_ndarray = None
             data = self.load_ucf_image(video_name, video_path, selected_index)
             sample = (type_name, video_name, data, self.map_name_label[type_name])
         else:
@@ -110,21 +115,20 @@ class SpatialDataset(Data.Dataset):
         if self.dataset_flag == 'spatial':
             return self.output_transformer(img)
         if self.dataset_flag == 'spatial_dmd':
-            dmd_file_name = os.path.join(self.dmd_data_path, f'{video_name}.npz')
-            if self.dmd_ndarray is None:
-                self.dmd_ndarray = np.load(dmd_file_name)['arr_0']
-            # load split index
-            input_dmd = self.dmd_ndarray[selected_index]
-            return self.output_transformer(img, input_dmd)
+            dmd_file_name = os.path.join(self.dmd_data_path, video_name, f'npy{selected_index + 1:06d}.npz')
+            dmd_ndarray = np.load(dmd_file_name)['arr_0']
+            output = self.output_transformer(img, dmd_ndarray)
+            return output
         raise Exception(f'does NOT support {self.dataset_flag}')
     def generate_dmd_npy(self):
         '''
         generate dmd npy file
         '''
         for type_name, video_name, video_path, frame_count in tqdm(self.record_list):
-            output_video_path = os.path.join(self.dmd_data_path, f'{video_name}.npz')
+            output_video_path = os.path.join(self.dmd_data_path, video_name)
             if os.path.exists(output_video_path):
                 continue
+            os.mkdir(output_video_path)
             # load gray image
             files = filter(lambda f: f.endswith('.jpg'), os.listdir(video_path))
             files = sorted(files, key = lambda f: int(os.path.splitext(f)[0][len('frame'):]))
@@ -142,7 +146,11 @@ class SpatialDataset(Data.Dataset):
             if not output_array.shape[0] == frame_count:
                 raise Exception(f'output shape mismatch')
             # save file
-            np.savez_compressed(output_video_path, output_array)
+            for i in range(output_array.shape[0]):
+                np.savez_compressed(
+                    os.path.join(output_video_path, f'npy{i+1:06d}.npz'),
+                    output_array[i],
+                )
     def set_dataset_flag(self, dataset_flag):
         '''
         set dataset flag
@@ -239,7 +247,7 @@ class Dataset(object):
         data loader
         '''
         if phase == 'train':
-            return Data.DataLoader(
+            return DataLoaderX(
                 dataset = self.train_dataset,
                 batch_size = self.batch_size,
                 shuffle = True,
@@ -247,7 +255,7 @@ class Dataset(object):
                 drop_last = True,
             )
         if phase == 'test':
-            return Data.DataLoader(
+            return DataLoaderX(
                 dataset = self.test_dataset,
                 batch_size = self.batch_size,
                 shuffle = False,
@@ -266,7 +274,7 @@ if __name__ == '__main__':
         '/datasets/UCF101/jpegs_256',
         '/datasets/UCF101/UCF_list',
         '01',
-        'spatial',
+        'spatial_dmd',
         25,
         0,
     )

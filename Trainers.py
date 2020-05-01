@@ -25,9 +25,9 @@ class Trainer(object):
             '/datasets/UCF101/jpegs_256',
             '/datasets/UCF101/UCF_list',
             '01',
-            'spatial_dmd',
+            'spatial',
             25,
-            8,
+            16,
         )
         self.train_loader = self.dataset.get_loader('train')
         self.test_loader = self.dataset.get_loader('test')
@@ -46,7 +46,6 @@ class Trainer(object):
         output_array = list()
         label_array = list()
         for _, video_name, image, label in tqdm(self.test_loader):
-            image = image[:,0:3,:,:]
             image = image.to(self.device)
             output = self.net(image)
             # transfer to cpu
